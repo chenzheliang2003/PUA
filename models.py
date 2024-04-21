@@ -104,7 +104,7 @@ class WindowSelfAttention(nn.Module):
         qkv = qkv.reshape(B_, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
         attn = (F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1))
-        logit_scale = torch.clamp(self.logit_scale, max=torch.log(torch.tensor(1. / .01))).exp()
+        logit_scale = torch.clamp(self.logit_scale, max=torch.log(torch.tensor(1. / .01, device=self.logit_scale.device))).exp()
         attn = attn * logit_scale
         relative_position_bias_table = self.cpb_mlp(self.relative_coords_table).view(-1, self.num_heads)
         relative_position_bias = relative_position_bias_table[self.relative_position_index.view(-1)].view(
@@ -198,7 +198,7 @@ class WindowCrossAttention(nn.Module):
         qkv2 = qkv2.reshape(B_, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
         q, k, v = qkv2[0], qkv1[1], qkv1[2]
         attn = (F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1))
-        logit_scale = torch.clamp(self.logit_scale, max=torch.log(torch.tensor(1. / .01))).exp()
+        logit_scale = torch.clamp(self.logit_scale, max=torch.log(torch.tensor(1. / .01, device=self.logit_scale.device))).exp()
         attn = attn * logit_scale
         relative_position_bias_table = self.cpb_mlp(self.relative_coords_table).view(-1, self.num_heads)
         relative_position_bias = relative_position_bias_table[self.relative_position_index.view(-1)].view(
@@ -365,7 +365,6 @@ class CrossSwinTransformerBlock(nn.Module):
         cross = cross.view(B, H * W * D, C)
         cross = shortcut + self.drop_path(self.norm1(cross))
         cross = cross + self.drop_path(self.norm2(self.mlp(cross)))
-
         return cross
 
 
@@ -516,7 +515,7 @@ class SwinTransformer(nn.Module):
                  embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
                  window_size=(7, 7, 7), mlp_ratio=4., qkv_bias=True,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=.2,
-                 norm_layer=nn.LayerNorm, ape=True):
+                 norm_layer=nn.LayerNorm, ape=False):
         super().__init__()
         self.num_layers = len(depths)
         self.embed_dim = embed_dim
@@ -659,12 +658,11 @@ class SpatialTransformer(nn.Module):
 
 class PUA(nn.Module):
 
-    def __init__(self, img_size=(224, 224, 224), embed_dim=36, depths=[2, 2, 4, 2], num_heads=[4, 8, 16, 32], window_size=(7, 7, 7)):
-        # ixi 改成了 36, 到时候记得改回 48
+    def __init__(self, img_size=(224, 224, 224), embed_dim=48, depths=[2, 2, 4, 2], num_heads=[6, 12, 24, 48], window_size=(7, 7, 7)):
         super().__init__()
         self.transformer = SwinTransformer(img_size=img_size, in_chans=1, embed_dim=embed_dim, 
                                            depths=depths, num_heads=num_heads, window_size=window_size,
-                                           drop_path_rate=.2)
+                                           drop_path_rate=.3)
         num_layers = len(depths)
         self.decoders = nn.ModuleList([DecoderBlock(embed_dim * 2 ** (num_layers - i_layer - 1), 
                                                     embed_dim // 2 * 2 ** (num_layers - i_layer - 1), 

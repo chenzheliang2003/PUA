@@ -3,15 +3,12 @@ import sys
 import glob
 import argparse
 import torch
-import torch.nn.functional as F
 from torch.utils.data import Dataset
-from torchvision import transforms
 import numpy as np
 import pickle
 import SimpleITK as sitk
 from natsort import natsorted
-import matplotlib.pyplot as plt
-
+import csv
 
 class LPBA40Dataset(Dataset):
     
@@ -120,8 +117,27 @@ def parse_arguments():
                         help="Tag for saving dir")
     parser.add_argument("--cascade", type=int, default=2,
                         help="Cascade for warping")
+    parser.add_argument("--model_dir", type=str, default="PUA_LPBA40_grad_4.0",
+                        help="Dir of model")
     args = parser.parse_args()
     return args
+
+
+def label_info(dataset="LPBA40"):
+    if dataset == "LPBA40":
+        return ["L angular gyrus", "L caudate", "L cingulate gyrus", "L cuneus", "L fusiform gyrus", "L gyrus rectus",
+            "L hippocampus", "L inferior frontal gyrus", "L inferior occipital gyrus", "L inferior temporal gyrus",
+            "L insular cortex", "L lateral orbitofrontal gyrus", "L lingual gyrus", "L middle frontal gyrus",
+            "L middle occipital gyrus", "L middle orbitofrontal gyrus", "L middle temporal gyrus",
+            "L parahippocampal gyrus", "L postcentral gyrus", "L precentral gyrus", "L precuneus", "L putamen",
+            "L superior frontal gyrus", "L superior occipital gyrus", "L superior parietal gyrus",
+            "L superior temporal gyrus", "L supramarginal gyrus", "R angular gyrus", "R caudate",
+            "R cingulate gyrus", "R cuneus", "R fusiform gyrus", "R gyrus rectus", "R hippocampus",
+            "R inferior frontal gyrus", "R inferior occipital gyrus", "R inferior temporal gyrus", "R insular cortex",
+            "R lateral orbitofrontal gyrus", "R lingual gyrus", "R middle frontal gyrus", "R middle occipital gyrus",
+            "R middle orbitofrontal gyrus", "R middle temporal gyrus", "R parahippocampal gyrus", "R postcentral gyrus",
+            "R precentral gyrus", "R precuneus", "R putamen", "R superior frontal gyrus", "R superior occipital gyrus",
+            "R superior parietal gyrus", "R superior temporal gyrus", "R supramarginal gyrus"]
 
 
 def dice_score(x, y):
@@ -130,17 +146,33 @@ def dice_score(x, y):
     return (2. * (x * y).sum() + 1e-5) / (x.sum() + y.sum() + 1e-5)
 
 
-def get_label_dice(x, y, dataset="LPBA40"):
+def label_dice_score(x, y, dataset="LPBA40", return_list=False):
     if dataset == "LPBA40":
-        cls_lst = [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 61, 62,
+        cls_list = [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 61, 62,
                 63, 64, 65, 66, 67, 68, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 101, 102, 121, 122, 161, 162,
                 163, 164, 165, 166]
     else:
-        cls_lst = [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 21, 22, 23, 25, 26, 27, 28, 29, 30, 31, 32, 34, 36]
-    dice_lst = []
-    for cls in cls_lst:
-        dice_lst.append(dice_score(x == cls, y == cls).item())
-    return np.mean(dice_lst)
+        cls_list = [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 21, 22, 23, 25, 26, 27, 28, 29, 30, 31, 32, 34, 36]
+    dsc_list = []
+    for cls in cls_list:
+        dsc_list.append(dice_score(x == cls, y == cls).item())
+    if return_list:
+        return dsc_list
+    return np.mean(dsc_list)
+
+
+def jacobian_determinant(x):
+    dy = (x[:, 1:, :-1, :-1, :] - x[:, :-1, :-1, :-1, :])
+    dx = (x[:, :-1, 1:, :-1, :] - x[:, :-1, :-1, :-1, :])
+    dz = (x[:, :-1, :-1, 1:, :] - x[:, :-1, :-1, :-1, :])
+    d1 = (dx[..., 0] + 1) * ((dy[..., 1] + 1) * (dz[..., 2] + 1) - dz[..., 1] * dy[..., 2])
+    d2 = (dx[..., 1]) * (dy[..., 0] * (dz[..., 2] + 1) - dy[..., 2] * dx[..., 0])
+    d3 = (dx[..., 2]) * (dy[..., 0] * dz[..., 1] - (dy[..., 1] + 1) * dz[..., 0])
+    return d1 - d2 + d3
+
+def negative_jacobian(x):
+    jac_det = jacobian_determinant(x).cpu().numpy()
+    return 100 * np.sum(jac_det <= 0) / np.prod(x.shape)
 
 
 def save_checkpoint(state, save_dir="models", filename="checkpoint.pth.tar", max_model_num=8):
@@ -150,14 +182,15 @@ def save_checkpoint(state, save_dir="models", filename="checkpoint.pth.tar", max
         os.remove(model_lists[0])
         model_lists = natsorted(glob.glob(save_dir + "*"))
 
+def save_nifti(image, filename):
+    sitk_img = sitk.GetImageFromArray(image.cpu().squeeze().numpy())
+    sitk_img.SetDirection((1,0,0,0,1,0,0,0,1))
+    sitk.WriteImage(sitk_img, filename)
 
-def visualize(x, path):
-    x = x.squeeze()
-    slices = 1
-    for i in range(0, x.shape[0], 10):
-        plt.subplot(4, 5, slices)
-        plt.imshow(x[:, :, i].squeeze().cpu().detach(), cmap="gray")
-        plt.axis("off")
-        slices += 1
-    f = plt.gcf()
-    f.savefig(path)
+def save_csv(dsc_table, filename):
+    with open(filename, "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        header = ["anatomical structure", "methods", "Dice"]
+        writer.writerow(header)
+        for i, dsc in enumerate(dsc_table):
+            writer.writerow(dsc)
