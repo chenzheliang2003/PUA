@@ -25,14 +25,14 @@ def main():
     if args.dataset == "LPBA40":
         train_path = "../LPBA40_data/train/"
         train_label_path = "../LPBA40_data/train_label/"
-        test_path = "../LPBA40_data/test/"
-        test_label_path = "../LPBA40_data/test_label/"
+        val_path = "../LPBA40_data/test/"
+        val_label_path = "../LPBA40_data/test_label/"
         atlas_path = "../LPBA40_data/atlas.nii.gz"
         atlas_label_path = "../LPBA40_data/atlas_label.nii.gz"
         img_size = (160, 192, 160)
         window_size = (5, 6, 5)
         train_set = utils.LPBA40Dataset(glob.glob(train_path + "*"), atlas_path, glob.glob(train_label_path + "*"), atlas_label_path)
-        val_set = utils.LPBA40Dataset(glob.glob(test_path + "*"), atlas_path, glob.glob(test_label_path + "*"), atlas_label_path)
+        val_set = utils.LPBA40Dataset(glob.glob(val_path + "*"), atlas_path, glob.glob(val_label_path + "*"), atlas_label_path)
     else:
         train_path = "../IXI_data/Train/"
         val_path = "../IXI_data/Val/"
@@ -86,12 +86,12 @@ def main():
                     flow_field = model(moving, fixed)
                     moving = warp(moving, flow_field)
                     moving_label = warp_label(moving_label, flow_field)
-                dsc = utils.get_label_dice(moving_label, fixed_label, dataset=args.dataset)
+                dsc = utils.label_dice_score(moving_label, fixed_label, dataset=args.dataset)
                 eval_dsc.update(dsc.item(), args.batch_size)
                 print("Epoch {} - Iter {} of {} Dsc: {:.6f}".format(
                     epoch + 1, idx, len(val_loader), dsc.item()))
         print("Epoch {} - Dsc Avg: {:.6f}, Std: {:.6f}".format(epoch + 1, eval_dsc.avg, eval_dsc.std))
-        if epoch % args.save_frequency == 0:
+        if (epoch + 1) % args.save_frequency == 0:
             utils.save_checkpoint({
                 "epoch": epoch + 1,
                 "state_dict": model.state_dict(),
