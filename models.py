@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from torch.distributions.normal import Normal
 import numpy as np
+from mamba_ssm import Mamba
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 
 
@@ -293,6 +294,17 @@ class SelfSwinTransformerBlock(nn.Module):
         return x
 
 
+class MambaBlock(nn.Module):
+    def __init__(self, dim, d_state=16, d_conv=4, expand=2, norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.dim = dim
+        self.mamba = Mamba(d_model=dim, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.norm = norm_layer(dim)
+
+    def forward(self, x):
+        return self.norm(self.mamba(x))
+
+
 class CrossSwinTransformerBlock(nn.Module):
 
     def __init__(self, dim, input_resolution, num_heads, window_size=(7, 7, 7), shift_size=0,
@@ -405,28 +417,8 @@ class BasicLayer(nn.Module):
         self.dim = dim
         self.input_resolution = input_resolution
         self.depth = depth
-        self.self_blocks1 = nn.ModuleList([
-            SelfSwinTransformerBlock(dim=dim, input_resolution=input_resolution,
-                                    num_heads=num_heads, window_size=window_size,
-                                    shift_size=(0, 0, 0) if (i % 2 == 0) else (
-                                    window_size[0] // 2, window_size[1] // 2, window_size[2] // 2),
-                                    mlp_ratio=mlp_ratio,
-                                    qkv_bias=qkv_bias,
-                                    drop=drop, attn_drop=attn_drop,
-                                    drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
-                                    norm_layer=norm_layer)
-            for i in range(depth)])
-        self.self_blocks2 = nn.ModuleList([
-            SelfSwinTransformerBlock(dim=dim, input_resolution=input_resolution,
-                                    num_heads=num_heads, window_size=window_size,
-                                    shift_size=(0, 0, 0) if (i % 2 == 0) else (
-                                    window_size[0] // 2, window_size[1] // 2, window_size[2] // 2),
-                                    mlp_ratio=mlp_ratio,
-                                    qkv_bias=qkv_bias,
-                                    drop=drop, attn_drop=attn_drop,
-                                    drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
-                                    norm_layer=norm_layer)
-            for i in range(depth)])
+        self.mamba_blocks1 = nn.ModuleList([MambaBlock(dim=dim, norm_layer=norm_layer)] * depth)
+        self.mamba_blocks2 = nn.ModuleList([MambaBlock(dim=dim, norm_layer=norm_layer)] * depth)
         self.cross_block1 = CrossSwinTransformerBlock(dim=dim, input_resolution=input_resolution,
                                       num_heads=num_heads, window_size=window_size,
                                       shift_size=(0, 0, 0),
@@ -451,9 +443,9 @@ class BasicLayer(nn.Module):
     def forward(self, x, y):
         H, W, D = self.input_resolution
         B, _, C = x.shape
-        for blk in self.self_blocks1:
+        for blk in self.mamba_blocks1:
             x = blk(x)
-        for blk in self.self_blocks2:
+        for blk in self.mamba_blocks2:
             y = blk(y)
         cross_x = self.cross_block1(x, y).permute(0, 2, 1).contiguous().view(B, C, H, W, D)
         cross_y = self.cross_block2(y, x).permute(0, 2, 1).contiguous().view(B, C, H, W, D)
@@ -463,16 +455,6 @@ class BasicLayer(nn.Module):
         return x, y, cross_x, cross_y
 
     def _init_respostnorm(self):
-        for blk in self.self_blocks1:
-            nn.init.constant_(blk.norm1.bias, 0)
-            nn.init.constant_(blk.norm1.weight, 0)
-            nn.init.constant_(blk.norm2.bias, 0)
-            nn.init.constant_(blk.norm2.weight, 0)
-        for blk in self.self_blocks2:
-            nn.init.constant_(blk.norm1.bias, 0)
-            nn.init.constant_(blk.norm1.weight, 0)
-            nn.init.constant_(blk.norm2.bias, 0)
-            nn.init.constant_(blk.norm2.weight, 0)
         nn.init.constant_(self.cross_block1.norm1.bias, 0)
         nn.init.constant_(self.cross_block1.norm1.weight, 0)
         nn.init.constant_(self.cross_block1.norm2.bias, 0)
@@ -509,6 +491,22 @@ class ConvPatchEmbedding(nn.Module):
     def forward(self, x):
         return self.main(x).flatten(2).transpose(1, 2)
 
+class PatchEmbedding(nn.Module):
+
+    def __init__(self, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None):
+        super().__init__()
+        self.proj = nn.Conv3d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        if norm_layer is not None:
+            self.norm = norm_layer(embed_dim)
+        else:
+            self.norm = None
+
+    def forward(self, x):
+        x = self.proj(x).flatten(2).transpose(1, 2)
+        if self.norm is not None:
+            x = self.norm(x)
+        return x
+
 class SwinTransformer(nn.Module):
 
     def __init__(self, img_size=(224, 224, 224), in_chans=3,
@@ -522,8 +520,11 @@ class SwinTransformer(nn.Module):
         self.ape = ape
         self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
         self.mlp_ratio = mlp_ratio
-        self.patch_embed1 = ConvPatchEmbedding(in_chans=in_chans, embed_dim=embed_dim)
-        self.patch_embed2 = ConvPatchEmbedding(in_chans=in_chans, embed_dim=embed_dim)
+        # self.patch_embed1 = ConvPatchEmbedding(in_chans=in_chans, embed_dim=embed_dim)
+        # self.patch_embed2 = ConvPatchEmbedding(in_chans=in_chans, embed_dim=embed_dim)
+        # 消融实验
+        self.patch_embed1 = PatchEmbedding(in_chans=in_chans, embed_dim=embed_dim, norm_layer=norm_layer)
+        self.patch_embed2 = PatchEmbedding(in_chans=in_chans, embed_dim=embed_dim, norm_layer=norm_layer)
         num_patches = img_size[0] * img_size[1] * img_size[2] // 64
         patches_resolution = [img_size[0] // 4, img_size[1] // 4, img_size[2] // 4]
         self.patches_resolution = patches_resolution
@@ -658,7 +659,9 @@ class SpatialTransformer(nn.Module):
 
 class PUA(nn.Module):
 
-    def __init__(self, img_size=(224, 224, 224), embed_dim=48, depths=[2, 2, 4, 2], num_heads=[6, 12, 24, 48], window_size=(7, 7, 7)):
+    def __init__(self, img_size=(224, 224, 224), embed_dim=72, depths=[2, 2, 4, 2], num_heads=[4, 4, 8, 8], window_size=(7, 7, 7)):
+    # 消融实验
+    # def __init__(self, img_size=(224, 224, 224), embed_dim=48, depths=[2, 2, 4, 2], num_heads=[4, 4, 8, 8], window_size=(7, 7, 7)):
         super().__init__()
         self.transformer = SwinTransformer(img_size=img_size, in_chans=1, embed_dim=embed_dim, 
                                            depths=depths, num_heads=num_heads, window_size=window_size,

@@ -67,7 +67,7 @@ def main():
             loss = sim_loss + grad_loss
             optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=.5)
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=.2)
             optimizer.step()
             loss_all.update(loss.item(), args.batch_size)
             print("Epoch {} - Iter {} of {} Loss {:.6f}, Sim Loss: {:.6f}, Grad Loss: {:.6f}".format(

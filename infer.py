@@ -58,13 +58,13 @@ def main():
                 moving = warp(moving, flow_field)
                 moving_label = warp_label(moving_label, flow_field)
                 utils.save_nifti(flow_field.permute(0, 2, 3, 4, 1), "data/flow_field_{}_{}.nii.gz".format(idx, cascade))
-                nj += utils.negative_jacobian(flow_field)
+                nj += utils.negative_jacobian(flow_field.permute(0, 2, 3, 4, 1))
             utils.save_nifti(moving, "data/registered_{}.nii.gz".format(idx))
             utils.save_nifti(moving_label, "data/registered_label_{}.nii.gz".format(idx))
             dsc_list = utils.label_dice_score(moving_label, fixed_label, dataset=args.dataset, return_list=True)
             for i, dsc in enumerate(dsc_list):
                 dsc_table.append([label_info[i], "PUA", dsc])
-            eval_dsc.update(np.mean(dsc).item(), args.batch_size)
+            eval_dsc.update(np.mean(dsc_list).item(), args.batch_size)
             eval_nj.update(nj.item(), args.batch_size)
             idx += 1
         print("Dsc Avg: {:.6f}, Std: {:.6f}".format(eval_dsc.avg, eval_dsc.std))
